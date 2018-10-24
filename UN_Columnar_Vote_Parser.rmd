@@ -1,0 +1,492 @@
+---
+title: "UN Columnar Vote Parser"
+author: "Brody Vogel"
+date: "5/12/2018"
+output: pdf_document
+---
+# Library Loads
+```{r}
+# load the libraries you'll need
+library(pdftools)
+library(stringr)
+library(quanteda)
+library(dplyr)
+library(tools)
+library(countrycode)
+library(gsubfn)
+```
+
+# Scraping of Documents to Find Votes
+```{r}
+# this gets all the documents that I've uploaded; change the path to wherever you keep them on your machine
+docs <- c(list.files("/Users/brodyvogel/Desktop/UN_PDFs", full.names = TRUE, recursive = TRUE, pattern = "*.pdf"))
+
+# this holds the (not cleaned) results of the vote extraction process
+result <- data.frame(Meeting = character(), Resolution = character(), Results = character(), Details = character(), In_Favour = character(), Against = character(), Abstaining = character())
+
+# loops through the folder extracting votes from each document
+for (doc in docs) {
+  # convert your pdf to text
+  txt <- as.character(pdf_text(doc))
+
+  # document without the column splits
+  final_doc <- c()
+
+  # get rid of tabs
+  txt <- str_replace_all(txt, '\t', '')
+  
+  txt <- str_replace_all(txt, '\r', '')
+  
+  # break the pages down into lines
+  txt <- strsplit(txt, '\n')
+
+  # get some uniformity in the line lengths so they can be split (close to) correctly 
+  for (x in 1:length(txt)){
+    for (y in 1:length(txt[[x]])){
+                        # this 113 is basically guess-and-checked
+      if (nchar(txt[[x]][y]) < 113) {
+          # pad the lines with spaces to get the desired length
+        txt[[x]][y] <- str_pad(txt[[x]][y], 113, side = 'right', pad = ' ')
+      }
+   }
+  }
+
+  # place a divider by which to eventually split the lines; the goal is to get it in blank space between the columns
+  for (x in 1:length(txt)){
+    for (y in 1:length(txt[[x]])){
+      z <- nchar(txt[[x]][y])%/%2
+      while (substr(txt[[x]][y], z, z) != ' ') {
+        z <- z + 1
+      }
+      substr(txt[[x]][y], z, z) <- '|'
+    }
+  }
+
+  # gets the name of the document
+  meet <- str_split(txt[[1]][1], '\\|')[[1]][2]
+  meet <- str_replace_all(meet, ' ', '')
+  
+  # get rid of the header - you may need to adjust this; I only tested it on the first few documents
+  txt[[1]] <- txt[[1]][7:(length(txt[[1]])-8)]
+
+  #works through all the pages of the pdf
+  for (page in txt) {
+    # split by column - using the delimited '|' placed earlier (not perfect, but pretty close to correct; I couldn't figure out a way to do better)
+    splitter <- strsplit(page, '\\|')
+    
+    # everything else just goes about merging the columns into a coherent page
+    list1 <- c()
+    list2 <- c()
+    
+    for (line in splitter) {
+      list1 <- c(list1, line[1])
+      list2 <- c(list2, line[2])
+    }
+    final_doc <- c(final_doc, paste(c(list1, list2), sep = ' '))
+  }
+  
+  # creates a readable text
+  j <- paste(final_doc, collapse = '')
+  j <- gsub("NA", "", j, ignore.case = FALSE)
+  j <- gsub('\\s{2,}', ' ', j)
+
+  # find the votes
+  one <- str_locate_all(j, "A recorded vote was taken.")
+
+  # these hold the results
+  one <- data.frame(one)
+
+  res <- c()
+  yes <- c()
+  no <- c()
+  abs <- c()
+  dets <- c()
+  results <- c()
+  
+  if (nrow(one) > 0) {
+    for (vote in 1:nrow(one)) {
+  
+      # if it's the last vote, you have to be careful with the formatting
+      if (vote == nrow(one)) {
+        k <- substring(j, one$end[vote]+1, nchar(j))
+      }
+      else {
+        # theoretically, this should be the text containing the vote
+        k <- substring(j, one$end[vote]+1, one$start[vote + 1])
+      }
+  
+      # gets the details of the resolution as given by the President or Acting President
+      hold <- substring(j, one$start[vote]-1500, one$start[vote])
+      res <- c(res, substring(hold, data.frame(str_locate(hold, "The President|The Acting President"))$start[1], one$start[vote]))
+
+    # finds the actual results of the votes
+      ugly_phrase <- "In favour|Against|Abstaining|Subsequently|The President|The Acting President|n favour|gainst|bstaining"
+      two <- data.frame(str_locate_all(k, ugly_phrase))
+
+      # these all just toy with the index of the dataframe 'two' to get what you need
+      yes <- c(yes, substring(k, two$end[1]+2, two$start[2]-1))
+      no <- c(no, substring(k, two$end[2]+2, two$start[3]-1))
+  
+    # this (very roughly) separates the abstaining votes from the results of the vote given after said countries are listed
+      hold2 <- substring(k, two$end[3]+2, two$start[4]-1)
+      place <- data.frame(str_locate(hold2, 'adopted|retained|rejected'))
+      hold2 <- substring(hold2, 1, place$start[1]-20)
+      if (is.na(substring(k, two$start[3], two$end[3])) == FALSE & (substring(k, two$start[3], two$end[3]) == 'Abstaining' | substring(k, two$start[3], two$end[3]) == 'bstaining')){
+        abs <- c(abs, hold2)
+        possible <- substring(k, two$start[4], two$start[5])
+        if (is.na(data.frame(str_locate(possible, "Subsequently"))$start[1]) == FALSE) {
+          dets <- c(dets, possible)
+        }
+        else {
+          dets <- c(dets, 'N/A')
+        }
+  
+      # this gets the high-level results of the voting
+        hold1 <- data.frame(str_locate_all(substring(k, two$end[3]+2, two$start[4]-1), 'adopted|rejected|retained'))
+        results <- c(results, substring(substring(k, two$end[3]+2, two$start[4]-1), hold1$start[1], nchar(substring(k, two$end[3]+2, two$start[4]-1))))
+        }
+      else {
+        abs <- c(abs, 'N/A')
+        possible <- substring(k, two$start[3], two$start[4])
+        if (is.na(data.frame(str_locate(possible, "Subsequently"))$start[1]) == FALSE) {
+          dets <- c(dets, possible)
+        }
+        else {
+          dets <- c(dets, 'N/A')
+        }
+        hold1 <- data.frame(str_locate_all(substring(k, two$end[2]+2, two$start[3]-1), 'adopted|rejected|retained'))
+        results <- c(results, substring(substring(k, two$end[2]+2, two$start[3]-1), hold1$start[1], nchar(substring(k, two$end[2]+2, two$start[3]-1))))
+      }
+    }
+
+  # final dataframe with the votes
+    fin <- data.frame(Meeting = meet, Resolution = res, Results = results, Details = dets, In_Favour = yes, Against = no, Abstaining = abs)
+  
+    result <- rbind(result, fin)
+  
+  }
+}
+```
+
+# Cleaning the extracted vote results
+
+```{r}
+# this next section is for cleaning up the results of the vote extraction
+
+# make the entries character()s so they can be treated as strings
+for (col in names(result)) {
+  result[, col] <- as.character(result[, col])
+}
+
+# this tries to clean out the entries in the vote results columns that are not actually countries
+for (col in c('In_Favour', 'Against', 'Abstaining')){
+  for (row in 1:nrow(result)) {
+    caps <- data.frame(str_locate_all(as.character(result[row, col]), "[A-Z][^\\s]+"))
+    if (nrow(caps) > 0) {
+      if (is.na(caps$start[1]) == FALSE) {
+        # common things that errantly made it into the end of the vote results columns
+        if (grepl('Draf|Oper|The|Decem|General|Fif|Six|Seven|A/', substr(as.character(result[row, col]), caps$start[length(caps$start)], caps$end[length(caps$end)])) == FALSE) {
+          # this little bit cleans out things like footers that make it into the middle of the vote results columns
+          result[row, col] <- gsub('[[:digit:]]+|\\.', '', substr(as.character(result[row, col]), caps$start[1], caps$end[length(caps$end)]))
+       }
+        else {
+          if (nrow(caps) > 1) { 
+            # same function as above, only this time the last (problematic) entry in the vote results columns is               # also thrown out
+            result[row, col] <- gsub('[[:digit:]]+|\\.', '', substr(as.character(result[row, col]), caps$start[1], caps$end[length(caps$end) - 1]))
+          }
+          else {
+            # if it gets to here, the entry is empty
+            result[row, col] <- NA
+          }
+        }
+      }
+    }
+  }
+}
+
+# this cleans up an aesthetic issue with the high-level results column
+for (row in 1:nrow(result)) {
+  hold <- str_split(result[row, 'Details'], ' ')
+  if (hold[[1]][length(hold[[1]])] == 'in') {
+    result[row, 'Details'] <- paste(as.character(result[row, 'Details']), 'favour].', sep = ' ')
+  }
+}
+
+# make a copy of the dataframe so you can track the changes if desired
+result1 <- cbind(result)
+
+# in general, this next bit gets rid of a lot of things that sneak into the vote results columns
+result1$Results <- lapply(result1$Results, function(x) gsub('\\[|\\.', '', x))
+result1$In_Favour <- lapply(result1$In_Favour, function(x) gsub('A//|PV|\\\\|\\/|\\\b|Fifty[^A-Z]+|General Assembly|December| - |', '', x))
+result1$Abstaining <- lapply(result1$Abstaining, function(x) gsub('A//|PV|\\\\|\\/|\\\b|Fifty[^A-Z]+|General Assembly|December| - |', '', x))
+result1$Against <- lapply(result1$Against, function(x) gsub('A//|PV|\\\\|\\/|\\\b|Fifty[^A-Z]+|General Assembly|December| - |', '', x))
+
+result1$In_Favour <- lapply(result1$In_Favour, function(x) gsub('  ', ' ', x))
+result1$Abstaining <- lapply(result1$Abstaining, function(x) gsub('  ', ' ', x))
+result1$Against <- lapply(result1$Against, function(x) gsub('  ', ' ', x))
+
+result1$In_Favour <- lapply(result1$In_Favour, function(x) gsub('\\(|\\)', '-', x))
+result1$Abstaining <- lapply(result1$Abstaining, function(x) gsub('\\(|\\)', '-', x))
+result1$Against <- lapply(result1$Against, function(x) gsub('\\(|\\)', '-', x))
+
+# keep only the votes in the results set that Dr. Voeten requested
+keeps <- c()
+for (row in 1:nrow(result1)) {
+  if (grepl('amendment', result1[row, 'Resolution'], ignore.case = T) == T | grepl('rejected|retained', result1[row, 'Results'], ignore.case = T) == T) {
+    keeps <- c(keeps, row)
+  }
+}
+
+result1 <- result1[keeps, ]
+
+# for cleaning out leading or trailing nonsense in the vote results columns
+clean <- function (x) {
+  t <- str_split(x, ',')
+  t <- lapply(t, function(z) trimws(z, which = 'both'))[[1]]
+  for (country in 1:length(t)) {
+    if (grepl('^[A-Z]', t[country]) == FALSE) {
+      hold <- str_locate(t[country], '[A-Z]')
+      if (is.na(hold[1]) == FALSE) {
+        t[country] <- substr(t[country], hold[1], nchar(t[country]))
+      }
+      else {
+        t[country] <- ''
+      }
+    }
+  }
+      
+  t <- paste(t, collapse = ',')
+  return(t)
+}
+
+for (col in c('In_Favour', 'Against', 'Abstaining')) {
+  for (row in 1:nrow(result1)) {
+    result1[row, col] <- clean(result1[row, col])
+  }
+}
+```
+
+# Turning the results into a usable format
+
+```{r}
+# this gets all the countries that have voted
+countries1 <- unique(list(unlist(str_split(result1$In_Favour, ','))))
+countries2 <- unique(list(unlist(str_split(result1$Against, ','))))
+countries3 <- unique(list(unlist(str_split(result1$Abstaining, ','))))
+
+fin_countries <- unique(c(countries1[[1]], countries2[[1]], countries3[[1]]))[order(unique(c(countries1[[1]], countries2[[1]], countries3[[1]])))]
+
+# here's a dataframe to hold the actual, granular voting results in a more accessible format; each of the 
+# unique countries found above is represented as a column
+test_out <- data.frame(matrix(nrow = nrow(result1), ncol = 4 + length(fin_countries)))
+names(test_out) <- c('Meeting', 'Resolution', 'Results', 'Details', fin_countries)
+test_out <- test_out[, c(1:4, 6:length(test_out))]
+
+# this classifies each vote, for every resolution
+for (row in 1:nrow(result1)) {
+  test_out[row, 1:4] <- result1[row, 1:4]
+  for (col in c('In_Favour', 'Against', 'Abstaining')) {
+    for (country in str_split(result1[row, col], ',')[[1]]) {
+      if (country != '') {
+        if (col == 'In_Favour') {
+          test_out[row, country] <- 'Y'
+        }
+        else if (col == 'Against') {
+          test_out[row, country] <- 'N'
+        }
+        else {
+          test_out[row, country] <- 'A'
+        }
+      }
+    }
+  }
+}
+
+# replace the NAs with blank spaces for the coming measures
+test_out[is.na(test_out)] <- ''
+
+# again, make a copy of the results so changes can be tracked
+t_o2 <- cbind(test_out)
+
+# this is for combining columns that refer to the same country, but were entered in different styles
+# (eg. Côte de Ivorie vs Cote de Ivorie)
+push <- function(a, b) {
+  t <- a
+  z <- b
+  for (name in z) {
+    t_o2[, t] <- gsub(' ', '', paste(t_o2[, t], t_o2[, name]))
+    names(t_o2)[z] <- 'clear'
+  }
+  return(t_o2)
+}
+
+# found these manually by looking at the column names; this actually does the merging of the columns
+t_o2 <- push(12, c(13))
+t_o2 <- push(26, c(25))
+t_o2 <- push(27, c(28))
+t_o2 <- push(29, c(30, 31))
+t_o2 <- push(35, c(34, 36))
+t_o2 <- push(44, c(40))
+t_o2 <- push(45, c(46))
+t_o2 <- push(54, c(55, 56, 57))
+t_o2 <- push(59, c(60))
+t_o2 <- push(63, c(64, 65, 66))
+t_o2 <- push(71, c(72))
+t_o2 <- push(75, c(76))
+t_o2 <- push(94, c(95))
+t_o2 <- push(103, c(104))
+t_o2 <- push(109, c(106, 107, 108))
+t_o2 <- push(117, c(118))
+t_o2 <- push(125, c(123, 124, 126))
+t_o2 <- push(144, c(101))
+t_o2 <- push(131, c(132:136))
+t_o2 <- push(147, c(146, 148, 149))
+t_o2 <- push(152, c(151))
+t_o2 <- push(153, c(108))
+t_o2 <- push(155, c(188))
+t_o2 <- push(167, c(168))
+t_o2 <- push(174, c(173))
+t_o2 <- push(180, c(179))
+t_o2 <- push(191, c(190))
+t_o2 <- push(197, c(193))
+t_o2 <- push(195, c(194, 196))
+t_o2 <- push(198, c(199))
+t_o2 <- push(265, c(266))
+t_o2 <- push(116, c(107))
+t_o2 <- push(205, c(206))
+t_o2 <- push(209, c(210))
+t_o2 <- push(214, c(213))
+t_o2 <- push(220, c(219))
+t_o2 <- push(227, c(226, 228, 229))
+t_o2 <- push(234, c(233))
+t_o2 <- push(236, c(237))
+t_o2 <- push(240, c(238, 239))
+t_o2 <- push(243, c(97))
+t_o2 <- push(246, c(245, 247))
+t_o2 <- push(251, c(249, 250, 252))
+t_o2 <- push(256, c(253:255, 257:259))
+t_o2 <- push(261, c(260, 262:264, 279))
+t_o2 <- push(268, c(265:267, 269:278))
+t_o2 <- push(282, c(281))
+t_o2 <- push(284, c(283, 285))
+t_o2 <- push(286, c(287:289))
+t_o2 <- push(290, c(291, 292))
+t_o2 <- push(294, c(293, 295, 296))
+t_o2 <- push(301, c(232, 297:300, 302))
+t_o2 <- push(304, c(303, 305:308))
+t_o2 <- push(309, c(310, 311))
+
+t_o2 <- t_o2[, names(t_o2) != 'clear']
+
+# this updates some names that got thrown off somewhere in the code
+names(t_o2)[10] <- 'Antigua & Barbuda'
+names(t_o2)[29] <- 'Brunei'
+names(t_o2)[45] <- 'Ivory Coast'
+names(t_o2)[82] <- 'India'
+
+names(test_out)
+```
+
+# Beginning of a section that'll assign each entry a COW code
+
+```{r}
+load('/Users/brodyvogel/Downloads/ExtraVotes.rda')
+
+push <- function(a, b) {
+  t <- a
+  z <- b
+  for (name in z) {
+    test_out_votes[, t] <- gsub(' ', '', paste(test_out_votes[, t], test_out_votes[, name]))
+    names(test_out_votes)[z] <- 'clear'
+  }
+  return(test_out_votes)
+}
+
+test_out_votes <- push(34, c(38))
+test_out_votes <- push(67, c(181, 203))
+test_out_votes <- push(104, c(105))
+test_out_votes <- push(120, c(148))
+test_out_votes <- push(160, c(161))
+test_out_votes <- push(201, c(202))
+test_out_votes <- test_out_votes[, names(test_out_votes) != 'clear']
+
+# this is the COW code numbers for each country
+COW <- read.csv('/Users/brodyvogel/Desktop/Work Study/COW country codes.csv')
+COW$StateNme <- as.character(COW$StateNme)
+
+# creates a Pythonic-like dictionary data structure
+someenv<-new.env()
+for (row in 1:nrow(COW)) {
+  someenv[[COW[row, 'StateNme']]] <- COW[row, 'CCode']
+}
+
+# throw out the 'None' and 'NA' columns
+#test_out_votes <- test_out_votes[, c(1:123, 125:132, 134:200)]
+
+# add a column denoting the number of votes that have been counted; for checking the accuracy of results
+#test_out_votes$Votes.Counted <- apply(test_out_votes[, 5:198], 1, function(x) sum(x != ''))
+
+names(test_out_votes)[51] <- 'North Korea'
+names(test_out_votes)[66] <- 'Macedonia'
+names(test_out_votes)[77] <- 'Guinea-Bissau'
+names(test_out_votes)[85] <- 'Iran'
+names(test_out_votes)[98] <- 'Laos'
+names(test_out_votes)[117] <- 'Federated States of Micronesia'
+names(test_out_votes)[145] <- 'South Korea'
+names(test_out_votes)[147] <- 'Russia'
+names(test_out_votes)[149] <- 'St. Kitts and Nevis' 
+names(test_out_votes)[150] <- 'St. Lucia'
+names(test_out_votes)[151] <- 'St. Vincent and the Grenadines'
+someenv[['Serbia']] <- 345
+names(test_out_votes)[174] <- 'Syria'
+names(test_out_votes)[177] <- 'East Timor'
+names(test_out_votes)[188] <- 'United Kingdom'
+names(test_out_votes)[189] <- 'Tanzania'
+names(test_out_votes)[195] <- 'Vietnam'
+
+test_out_votes <- test_out_votes[, c(200, 1:199)]
+
+test_out_votes[376, 189] <- substr(test_out_votes[376, 191], 2, 2)
+test_out_votes[376, 191] <- substr(test_out_votes[376, 191], 1, 1)
+
+test_out_votes[391, 189] <- substr(test_out_votes[391, 191], 2, 2)
+test_out_votes[391, 191] <- substr(test_out_votes[391, 191], 1, 1)
+
+test_out_votes[392, 189] <- substr(test_out_votes[392, 191], 2, 2)
+test_out_votes[392, 191] <- substr(test_out_votes[392, 191], 1, 1)
+
+# final output dataframe
+test_out_votes1 <- data.frame(Meeting = as.character(), Resolution = as.character(), Country = as.character(), CCode = as.numeric(), Vote = as.character())
+
+# here are the final results, with country codes included
+for (row in 1:nrow(test_out_votes)) {
+  for (col in 7:200) {
+    new_row <- data.frame(Meeting = test_out_votes[row, 1], Resolution = test_out_votes[row, 2], Country = names(test_out_votes)[col], CCode = someenv[[names(test_out_votes)[col]]], Vote = test_out_votes[row, col])
+    test_out_votes1 <- rbind(test_out_votes1, new_row)
+  }
+}
+
+View(test_out_votes)
+
+save(test_out_votes, file = '/Users/brodyvogel/Desktop/test_out_votes.rda')
+
+test_out_votes1 <- test_out_votes1[sort(test_out_votes1$Country), ]
+
+save(test_out_votes1, file = '/Users/brodyvogel/Desktop/Each_Individual_Vote.rda')
+
+#names(test_out_votes)
+
+for (row in 1:(nrow(test_out_votes))) {
+  for (col in 7:200) {
+    if (nchar(test_out_votes[row, col]) > 1) {
+      print('Got One')
+      print(c(row, col))
+    }
+  }
+}
+
+
+names(test_out_votes)[191]
+
+View(test_out[, c(1:5, 200:300)])
+```
